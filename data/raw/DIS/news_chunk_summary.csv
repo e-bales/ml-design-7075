@@ -1,1 +1,8 @@
-
+window_number,window_start,window_end,window_days,row_count,is_truncated,was_split,split_depth,daily_limit_hit,daily_limit_message
+1,2026-03-12 14:54:00,2026-04-11 14:54:00,30.0,310,False,False,0,False,
+2,2026-02-10 14:53:00,2026-03-12 14:53:00,30.0,296,False,False,0,False,
+3,2026-01-11 14:52:00,2026-02-10 14:52:00,30.0,309,False,False,0,False,
+4,2025-12-12 14:51:00,2026-01-11 14:51:00,30.0,249,False,False,0,False,
+5,2025-11-12 14:50:00,2025-12-12 14:50:00,30.0,233,False,False,0,False,
+6,2025-10-13 14:49:00,2025-11-12 14:49:00,30.0,588,False,False,0,False,
+7,2025-10-11 14:54:00,2025-10-13 14:48:00,1.9958333333333333,68,False,False,0,False,
