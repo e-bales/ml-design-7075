@@ -217,7 +217,8 @@ def fetch_news_history(
     chunk_days: int,
     limit: int,
     pause_seconds: float,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    max_split_depth: int = 6,
+) -> tuple[pd.DataFrame, pd.DataFrame, bool, str | None]:
     end_dt = pd.Timestamp.now().floor("min")
     start_boundary = end_dt - pd.DateOffset(months=months_back)
 
@@ -249,7 +250,7 @@ def fetch_news_history(
             print(f"{indent}  Oldest: {chunk_df['time_published'].min()}")
             print(f"{indent}  Newest: {chunk_df['time_published'].max()}")
 
-        should_split = summary.is_truncated and summary.window_days > 7
+        should_split = summary.is_truncated and summary.window_days > 7 and depth < max_split_depth
         chunk_summaries.append(
             {
                 "window_number": window_id,
@@ -363,6 +364,41 @@ def write_outputs(
     print(f"  {archive_summary_path}")
 
 
+def fetch_macro_series(function: str, api_key: str, interval: str | None = None) -> pd.DataFrame:
+    params = {"function": function, "apikey": api_key}
+    if interval:
+        params["interval"] = interval
+    data = alpha_vantage_get(params)
+
+    rows = data.get("data", [])
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        df = df.sort_values("date").reset_index(drop=True)
+    return df
+
+
+def write_macro_outputs(
+    fed_funds_df: pd.DataFrame,
+    cpi_df: pd.DataFrame,
+    output_dir: Path,
+) -> None:
+    macro_dir = output_dir / "macro"
+    macro_dir.mkdir(parents=True, exist_ok=True)
+
+    fed_path = macro_dir / "federal_funds_rate.csv"
+    cpi_path = macro_dir / "cpi.csv"
+
+    fed_funds_df.to_csv(fed_path, index=False)
+    cpi_df.to_csv(cpi_path, index=False)
+
+    print()
+    print("Saved macro files:")
+    print(f"  {fed_path}")
+    print(f"  {cpi_path}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Ingest Alpha Vantage daily prices and news sentiment."
@@ -395,7 +431,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pause-seconds",
         type=float,
-        default=1.2,
+        default=1.5,
         help="Pause between news requests to be gentle with rate limits.",
     )
     parser.add_argument(
@@ -408,6 +444,16 @@ def parse_args() -> argparse.Namespace:
         default=str(DEFAULT_ARCHIVE_DIR),
         help="Directory for timestamped archived CSV pulls.",
     )
+    parser.add_argument(
+        "--skip-macro",
+        action="store_true",
+        help="Skip fetching macro data (fed funds rate, CPI). Use on 2nd+ ticker runs in the same day to save API requests.",
+    )
+    parser.add_argument(
+        "--skip-prices",
+        action="store_true",
+        help="Skip fetching price data and reuse existing prices_daily.csv. Saves 1 API request per ticker.",
+    )
     return parser.parse_args()
 
 
@@ -418,9 +464,17 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     archive_dir = Path(args.archive_dir)
 
-    print(f"Fetching daily prices for {args.ticker}...")
-    price_df = fetch_daily_prices(args.ticker, api_key, args.price_outputsize)
-    print(f"Retrieved {len(price_df)} daily price rows.")
+    if args.skip_prices:
+        price_path = output_dir / args.ticker.upper() / "prices_daily.csv"
+        if not price_path.exists():
+            raise FileNotFoundError(f"--skip-prices set but no existing price file found at {price_path}")
+        price_df = pd.read_csv(price_path)
+        price_df["date"] = pd.to_datetime(price_df["date"])
+        print(f"Loaded existing prices for {args.ticker} ({len(price_df)} rows).")
+    else:
+        print(f"Fetching daily prices for {args.ticker}...")
+        price_df = fetch_daily_prices(args.ticker, api_key, args.price_outputsize)
+        print(f"Retrieved {len(price_df)} daily price rows.")
 
     print()
     print(f"Fetching news sentiment for {args.ticker}...")
@@ -447,6 +501,17 @@ def main() -> None:
         output_dir,
         archive_dir,
     )
+
+    if not args.skip_macro:
+        print()
+        print("Fetching macro data (fed funds rate + CPI)...")
+        try:
+            fed_funds_df = fetch_macro_series("FEDERAL_FUNDS_RATE", api_key, interval="daily")
+            cpi_df = fetch_macro_series("CPI", api_key, interval="monthly")
+            write_macro_outputs(fed_funds_df, cpi_df, output_dir)
+        except AlphaVantageDailyLimitError:
+            print("Daily API limit reached while fetching macro data.")
+            print("Ticker data was already saved. Re-run with --skip-macro tomorrow to get macro data.")
 
 
 if __name__ == "__main__":

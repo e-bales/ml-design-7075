@@ -1,0 +1,23 @@
+artifact_path: file:C:/Users/Jonbf5/OneDrive - University of Cincinnati/Classes/BANA7075
+  Machine Learning Design/Final Project/mlruns/1/models/m-9ad7d66b4a5b4470ab9a5113aceeb5f2/artifacts
+flavors:
+  python_function:
+    data: model.ubj
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.xgboost
+    python_version: 3.13.12
+  xgboost:
+    code: null
+    data: model.ubj
+    model_class: xgboost.sklearn.XGBClassifier
+    model_format: ubj
+    xgb_version: 3.2.0
+mlflow_version: 3.10.1
+model_id: m-9ad7d66b4a5b4470ab9a5113aceeb5f2
+model_size_bytes: 265851
+model_uuid: m-9ad7d66b4a5b4470ab9a5113aceeb5f2
+prompts: null
+run_id: 6b750bca4172410a99acfc6b6e7c60b4
+utc_time_created: '2026-04-10 22:25:09.978820'
