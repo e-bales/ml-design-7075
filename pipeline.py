@@ -83,11 +83,17 @@ def alpha_vantage_get(params: dict) -> dict:
             or "1 request per second" in info_message.lower()
             or "25 requests per day" in info_message.lower()
         ):
-            if "25 requests per day" in info_message.lower():
-                raise AlphaVantageDailyLimitError(info_message)
+            # If actual data keys are present alongside the info message, return
+            # the data — Alpha Vantage sometimes includes boilerplate in valid responses.
+            data_keys = set(data.keys()) - {"Information", "Note", "Meta Data"}
+            if data_keys:
+                return data
 
+            # No data returned. Alpha Vantage uses the same message for both the
+            # per-second rate limit and the daily limit. Always retry with backoff
+            # first; only treat as a daily limit after all retries are exhausted.
             if attempt == max_attempts:
-                raise RuntimeError(info_message)
+                raise AlphaVantageDailyLimitError(info_message)
 
             wait_seconds = max(2.0, attempt * 2.0)
             print(
