@@ -1,0 +1,24 @@
+artifact_path: file:C:/Users/Jonbf5/OneDrive - University of Cincinnati/Classes/BANA7075
+  Machine Learning Design/Final Project/mlruns/1/models/m-317f9aa3336345f59e8d991c2129f8ca/artifacts
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.pkl
+    predict_fn: predict
+    python_version: 3.13.12
+  sklearn:
+    code: null
+    pickled_model: model.pkl
+    serialization_format: cloudpickle
+    sklearn_version: 1.8.0
+    skops_trusted_types: null
+mlflow_version: 3.10.1
+model_id: m-317f9aa3336345f59e8d991c2129f8ca
+model_size_bytes: 806898
+model_uuid: m-317f9aa3336345f59e8d991c2129f8ca
+prompts: null
+run_id: cf4fc864211d40ea94d15ea512ccda6e
+utc_time_created: '2026-04-10 21:49:18.389147'
