@@ -1,6 +1,6 @@
 ﻿# ml-design-7075
 
-Our preliminary README for the stock market prediction model operations workflow.
+Our preliminary README for the stock market prediction model operations workflow. Read on for more information on the data pipeline setup and instructions on how to setup.
 
 # Pipeline README
 
@@ -21,7 +21,7 @@ When you run the script, it:
 
 ## API Key
 
-Add your Alpha Vantage key to `.env`. Accepted names include:
+Log onto [ Alpha Vantage ](https://www.alphavantage.co/) and click on "GET FREE API KEY" generate your own API key. Add your Alpha Vantage key to `.env`. Accepted names include:
 
 - `ALPHA_VANTAGE_API_KEY`
 - `ALPHAVANTAGE_API_KEY`
