@@ -1,6 +1,14 @@
-﻿# ml-design-7075
+# Market Confidence Modeling: Predicting Next-Day Stock Direction
 
 Our preliminary README for the stock market prediction model operations workflow. Read on for more information on the project details, including the problem statement, purpose of the ML system, stakeholders, workflow, and data pipeline setup instructions.
+
+## Project Team
+
+- Devin Walker
+- Vivian Comer
+- Eli Bales
+- Andrew Mccurrach
+- Colton Jones
 
 ## Project Overview
 
