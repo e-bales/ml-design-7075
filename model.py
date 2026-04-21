@@ -61,9 +61,7 @@ MACRO_FEATURE_COLS = [
     "high_yield_spread",
 ]
 
-# Macro features require sufficient training data to be useful.
-# Set to False until full price history is available.
-USE_MACRO = False
+USE_MACRO = True
 
 TARGET_COL = "target_up"
 
@@ -109,6 +107,37 @@ def get_feature_cols(df: pd.DataFrame) -> list[str]:
     ticker_cols = [c for c in df.columns if c.startswith("ticker_")]
     macro_cols = [c for c in MACRO_FEATURE_COLS if c in df.columns] if USE_MACRO else []
     return PRICE_FEATURE_COLS + SENTIMENT_FEATURE_COLS + macro_cols + ticker_cols
+
+
+def get_feature_cols_single_ticker(df: pd.DataFrame) -> list[str]:
+    macro_cols = [c for c in MACRO_FEATURE_COLS if c in df.columns] if USE_MACRO else []
+    return PRICE_FEATURE_COLS + SENTIMENT_FEATURE_COLS + macro_cols
+
+
+def build_models() -> list:
+    return [
+        (
+            "logistic_regression",
+            LogisticRegression(max_iter=1000, random_state=42),
+            True,
+        ),
+        (
+            "random_forest",
+            RandomForestClassifier(n_estimators=200, max_depth=6, random_state=42),
+            False,
+        ),
+        (
+            "xgboost",
+            XGBClassifier(
+                n_estimators=200,
+                max_depth=4,
+                learning_rate=0.05,
+                eval_metric="logloss",
+                random_state=42,
+            ),
+            False,
+        ),
+    ]
 
 
 def time_split(
@@ -287,7 +316,8 @@ def run_model(
     cutoff_date: pd.Timestamp,
     artifact_dir: Path,
     scale: bool = False,
-) -> None:
+    show_ticker_breakdown: bool = True,
+) -> dict:
     if scale:
         scaler = StandardScaler()
         X_train_fit = scaler.fit_transform(X_train)
@@ -348,27 +378,25 @@ def run_model(
         print(f"  Buy & Hold:        {buy_hold_ret:.2%}")
 
         # Per-ticker breakdown
-        ticker_df = compute_per_ticker_metrics(
-            y_test, y_pred, y_proba, test_returns, test_tickers
-        )
-        print(f"\n  {'Ticker':<8} {'Acc':>6} {'AUC':>6} {'Strat':>8} {'B&H':>8} {'Edge':>8}")
-        print(f"  {'-'*50}")
-        for ticker, row in ticker_df.iterrows():
-            auc_str = f"{row['roc_auc']:.3f}" if row["roc_auc"] is not None else "  N/A"
-            print(
-                f"  {ticker:<8} {row['accuracy']:>6.3f} {auc_str:>6} "
-                f"{row['strategy_return']:>8.2%} {row['buy_hold_return']:>8.2%} "
-                f"{row['vs_buy_hold']:>+8.2%}"
+        if show_ticker_breakdown:
+            ticker_df = compute_per_ticker_metrics(
+                y_test, y_pred, y_proba, test_returns, test_tickers
             )
-
-        # Log per-ticker metrics to MLflow
-        for ticker, row in ticker_df.iterrows():
-            mlflow.log_metric(f"{ticker}_accuracy", row["accuracy"])
-            mlflow.log_metric(f"{ticker}_strategy_return", row["strategy_return"])
-            mlflow.log_metric(f"{ticker}_vs_buy_hold", row["vs_buy_hold"])
-
-        pt_path = save_per_ticker_chart(ticker_df, run_name, artifact_dir)
-        mlflow.log_artifact(str(pt_path))
+            print(f"\n  {'Ticker':<8} {'Acc':>6} {'AUC':>6} {'Strat':>8} {'B&H':>8} {'Edge':>8}")
+            print(f"  {'-'*50}")
+            for ticker, row in ticker_df.iterrows():
+                auc_str = f"{row['roc_auc']:.3f}" if row["roc_auc"] is not None else "  N/A"
+                print(
+                    f"  {ticker:<8} {row['accuracy']:>6.3f} {auc_str:>6} "
+                    f"{row['strategy_return']:>8.2%} {row['buy_hold_return']:>8.2%} "
+                    f"{row['vs_buy_hold']:>+8.2%}"
+                )
+            for ticker, row in ticker_df.iterrows():
+                mlflow.log_metric(f"{ticker}_accuracy", row["accuracy"])
+                mlflow.log_metric(f"{ticker}_strategy_return", row["strategy_return"])
+                mlflow.log_metric(f"{ticker}_vs_buy_hold", row["vs_buy_hold"])
+            pt_path = save_per_ticker_chart(ticker_df, run_name, artifact_dir)
+            mlflow.log_artifact(str(pt_path))
 
         # Artifacts
         cm_path = save_confusion_matrix(y_test, y_pred, run_name, artifact_dir)
@@ -392,6 +420,66 @@ def run_model(
         else:
             mlflow.sklearn.log_model(model, "model")
 
+        return {
+            "accuracy": accuracy,
+            "roc_auc": roc_auc,
+            "backtest_return": backtest_ret,
+            "buy_hold_return": buy_hold_ret,
+        }
+
+
+def run_ticker_specific_models(
+    df: pd.DataFrame,
+    cutoff_date: pd.Timestamp,
+    artifact_dir: Path,
+) -> None:
+    feature_cols = get_feature_cols_single_ticker(df)
+    models = build_models()
+    summary = []
+
+    for ticker in sorted(df["ticker"].unique()):
+        ticker_df = df[df["ticker"] == ticker].copy()
+        train_df = ticker_df[ticker_df["date"] < cutoff_date]
+        test_df = ticker_df[ticker_df["date"] >= cutoff_date]
+
+        X_train = train_df[feature_cols]
+        X_test = test_df[feature_cols]
+        y_train = train_df[TARGET_COL]
+        y_test = test_df[TARGET_COL]
+        test_returns = test_df["next_day_return"]
+        test_tickers = test_df["ticker"]
+
+        for run_name, model, scale in models:
+            metrics = run_model(
+                model=model,
+                run_name=f"{ticker}_{run_name}",
+                X_train=X_train.copy(),
+                X_test=X_test.copy(),
+                y_train=y_train,
+                y_test=y_test,
+                feature_cols=feature_cols,
+                test_returns=test_returns,
+                test_tickers=test_tickers,
+                cutoff_date=cutoff_date,
+                artifact_dir=artifact_dir,
+                scale=scale,
+                show_ticker_breakdown=False,
+            )
+            summary.append({"ticker": ticker, "model": run_name, **metrics})
+
+    print(f"\n{'='*72}")
+    print("  TICKER-SPECIFIC MODELS SUMMARY")
+    print(f"{'='*72}")
+    print(f"  {'Ticker':<6} {'Model':<22} {'Acc':>6} {'AUC':>6} {'Strat':>8} {'B&H':>8} {'Edge':>8}")
+    print(f"  {'-'*66}")
+    for row in summary:
+        auc_str = f"{row['roc_auc']:.3f}" if row["roc_auc"] is not None else "  N/A"
+        edge = row["backtest_return"] - row["buy_hold_return"]
+        print(
+            f"  {row['ticker']:<6} {row['model']:<22} {row['accuracy']:>6.3f} {auc_str:>6} "
+            f"{row['backtest_return']:>8.2%} {row['buy_hold_return']:>8.2%} {edge:>+8.2%}"
+        )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -412,6 +500,12 @@ def parse_args() -> argparse.Namespace:
         "--artifact-dir",
         default="mlflow_artifacts",
         help="Local directory for plot artifacts before logging to MLflow.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["pooled", "per-ticker", "both"],
+        default="both",
+        help="Training mode: pooled trains one model across all tickers, per-ticker trains one model per ticker, both runs both.",
     )
     return parser.parse_args()
 
@@ -446,49 +540,31 @@ def main() -> None:
 
     mlflow.set_experiment(EXPERIMENT_NAME)
 
-    models = [
-        (
-            "logistic_regression",
-            LogisticRegression(max_iter=1000, random_state=42),
-            True,
-        ),
-        (
-            "random_forest",
-            RandomForestClassifier(n_estimators=200, max_depth=6, random_state=42),
-            False,
-        ),
-        (
-            "xgboost",
-            XGBClassifier(
-                n_estimators=200,
-                max_depth=4,
-                learning_rate=0.05,
-                eval_metric="logloss",
-                random_state=42,
-            ),
-            False,
-        ),
-    ]
+    if args.mode in ("pooled", "both"):
+        print("\n--- POOLED MODELS ---")
+        for run_name, model, scale in build_models():
+            run_model(
+                model=model,
+                run_name=run_name,
+                X_train=X_train.copy(),
+                X_test=X_test.copy(),
+                y_train=y_train,
+                y_test=y_test,
+                feature_cols=feature_cols,
+                test_returns=test_returns,
+                test_tickers=test_tickers,
+                cutoff_date=cutoff_date,
+                artifact_dir=artifact_dir,
+                scale=scale,
+            )
 
-    for run_name, model, scale in models:
-        run_model(
-            model=model,
-            run_name=run_name,
-            X_train=X_train.copy(),
-            X_test=X_test.copy(),
-            y_train=y_train,
-            y_test=y_test,
-            feature_cols=feature_cols,
-            test_returns=test_returns,
-            test_tickers=test_tickers,
-            cutoff_date=cutoff_date,
-            artifact_dir=artifact_dir,
-            scale=scale,
-        )
+    if args.mode in ("per-ticker", "both"):
+        print("\n--- TICKER-SPECIFIC MODELS ---")
+        run_ticker_specific_models(df, cutoff_date, artifact_dir)
 
     print("\n" + "=" * 52)
     print("All runs complete. Launch MLflow UI with:")
-    print("  mlflow ui")
+    print("  python -m mlflow ui --backend-store-uri sqlite:///mlflow.db")
     print("Then open http://localhost:5000")
 
 
