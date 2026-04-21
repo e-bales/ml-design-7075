@@ -40,7 +40,7 @@ def load_env_file(env_path: Path) -> None:
         key = key.strip()
         value = value.strip().strip('"').strip("'")
 
-        if key and key not in os.environ:
+        if key:
             os.environ[key] = value
 
 
@@ -110,7 +110,7 @@ def alpha_vantage_get(params: dict) -> dict:
 
 def fetch_daily_prices(symbol: str, api_key: str, outputsize: str) -> pd.DataFrame:
     params = {
-        "function": "TIME_SERIES_DAILY",
+        "function": "TIME_SERIES_DAILY_ADJUSTED",
         "symbol": symbol,
         "outputsize": outputsize,
         "apikey": api_key,
@@ -127,8 +127,9 @@ def fetch_daily_prices(symbol: str, api_key: str, outputsize: str) -> pd.DataFra
                 "1. open": "open",
                 "2. high": "high",
                 "3. low": "low",
-                "4. close": "close",
-                "5. volume": "volume",
+                "4. close": "raw_close",
+                "5. adjusted close": "close",
+                "6. volume": "volume",
             }
         )
         .reset_index()
@@ -136,10 +137,17 @@ def fetch_daily_prices(symbol: str, api_key: str, outputsize: str) -> pd.DataFra
     )
 
     price_df["date"] = pd.to_datetime(price_df["date"])
-    for col in ["open", "high", "low", "close", "volume"]:
+    for col in ["open", "high", "low", "raw_close", "close", "volume"]:
         price_df[col] = pd.to_numeric(price_df[col], errors="coerce")
 
-    return price_df.sort_values("date").reset_index(drop=True)
+    # Apply the same split/dividend adjustment ratio to open, high, and low
+    # so all OHLC columns are consistently scaled with adjusted close.
+    ratio = price_df["close"] / price_df["raw_close"]
+    price_df["open"] = price_df["open"] * ratio
+    price_df["high"] = price_df["high"] * ratio
+    price_df["low"] = price_df["low"] * ratio
+
+    return price_df[["date", "open", "high", "low", "close", "volume"]].sort_values("date").reset_index(drop=True)
 
 
 def fetch_news_chunk(
@@ -224,9 +232,10 @@ def fetch_news_history(
     limit: int,
     pause_seconds: float,
     max_split_depth: int = 6,
+    start_from: pd.Timestamp | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, bool, str | None]:
     end_dt = pd.Timestamp.now().floor("min")
-    start_boundary = end_dt - pd.DateOffset(months=months_back)
+    start_boundary = start_from if start_from is not None else end_dt - pd.DateOffset(months=months_back)
 
     all_chunks = []
     chunk_summaries = []
@@ -325,6 +334,26 @@ def fetch_news_history(
         chunk_summary_df["daily_limit_message"] = daily_limit_message
 
     return news_df, chunk_summary_df, daily_limit_hit, daily_limit_message
+
+
+def get_last_price_date(price_path: Path) -> pd.Timestamp | None:
+    if not price_path.exists():
+        return None
+    try:
+        df = pd.read_csv(price_path, parse_dates=["date"])
+    except pd.errors.EmptyDataError:
+        return None
+    return df["date"].max() if not df.empty else None
+
+
+def get_last_news_dt(news_path: Path) -> pd.Timestamp | None:
+    if not news_path.exists():
+        return None
+    try:
+        df = pd.read_csv(news_path, parse_dates=["time_published"])
+    except pd.errors.EmptyDataError:
+        return None
+    return df["time_published"].max() if not df.empty else None
 
 
 def write_outputs(
@@ -460,6 +489,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip fetching price data and reuse existing prices_daily.csv. Saves 1 API request per ticker.",
     )
+    parser.add_argument(
+        "--skip-news",
+        action="store_true",
+        help="Skip fetching news data and reuse existing news_sentiment.csv. Useful when only re-pulling prices.",
+    )
+    parser.add_argument(
+        "--full-refresh",
+        action="store_true",
+        help="Ignore existing data and re-pull the full history. By default, only data newer than the last pull is fetched.",
+    )
     return parser.parse_args()
 
 
@@ -470,32 +509,91 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     archive_dir = Path(args.archive_dir)
 
+    price_path = output_dir / args.ticker.upper() / "prices_daily.csv"
+    news_path = output_dir / args.ticker.upper() / "news_sentiment.csv"
+
+    # Detect existing data so we can pull only what's missing.
+    existing_price_df = pd.DataFrame()
+    existing_news_df = pd.DataFrame()
+    last_price_date: pd.Timestamp | None = None
+    last_news_dt: pd.Timestamp | None = None
+
+    if not args.full_refresh:
+        last_price_date = get_last_price_date(price_path)
+        if last_price_date is not None:
+            existing_price_df = pd.read_csv(price_path, parse_dates=["date"])
+            print(f"Existing price data for {args.ticker}: last date {last_price_date.date()}. Will fetch incrementally.")
+
+        last_news_dt = get_last_news_dt(news_path)
+        if last_news_dt is not None:
+            existing_news_df = pd.read_csv(news_path, parse_dates=["time_published"])
+            print(f"Existing news data for {args.ticker}: last date {last_news_dt.date()}. Will fetch incrementally.")
+
+    # --- Prices ---
     if args.skip_prices:
-        price_path = output_dir / args.ticker.upper() / "prices_daily.csv"
         if not price_path.exists():
             raise FileNotFoundError(f"--skip-prices set but no existing price file found at {price_path}")
-        price_df = pd.read_csv(price_path)
-        price_df["date"] = pd.to_datetime(price_df["date"])
+        price_df = pd.read_csv(price_path, parse_dates=["date"])
         print(f"Loaded existing prices for {args.ticker} ({len(price_df)} rows).")
     else:
         print(f"Fetching daily prices for {args.ticker}...")
-        price_df = fetch_daily_prices(args.ticker, api_key, args.price_outputsize)
-        print(f"Retrieved {len(price_df)} daily price rows.")
+        new_price_df = fetch_daily_prices(args.ticker, api_key, args.price_outputsize)
+        print(f"Retrieved {len(new_price_df)} daily price rows from API.")
+
+        if not existing_price_df.empty and last_price_date is not None:
+            new_rows = new_price_df[new_price_df["date"] > last_price_date]
+            print(f"  {len(new_rows)} new price rows after {last_price_date.date()}.")
+            price_df = (
+                pd.concat([existing_price_df, new_rows], ignore_index=True)
+                .drop_duplicates(subset=["date"])
+                .sort_values("date")
+                .reset_index(drop=True)
+            )
+        else:
+            price_df = new_price_df
+
+        print(f"Total price rows after merge: {len(price_df)}.")
+
+    # --- News ---
+    if args.skip_news:
+        if not news_path.exists():
+            news_df = pd.DataFrame()
+        else:
+            try:
+                news_df = pd.read_csv(news_path, parse_dates=["time_published"])
+            except pd.errors.EmptyDataError:
+                news_df = pd.DataFrame()
+        chunk_summary_df = pd.DataFrame()
+        print()
+        print(f"Skipping news fetch for {args.ticker}. Using {len(news_df)} existing rows.")
+    else:
+        print()
+        print(f"Fetching news sentiment for {args.ticker}...")
+        news_df, chunk_summary_df, daily_limit_hit, daily_limit_message = fetch_news_history(
+            symbol=args.ticker,
+            api_key=api_key,
+            months_back=args.news_months,
+            chunk_days=args.news_chunk_days,
+            limit=args.news_limit,
+            pause_seconds=args.pause_seconds,
+            start_from=last_news_dt,
+        )
+
+        if not existing_news_df.empty and not news_df.empty:
+            news_df = (
+                pd.concat([existing_news_df, news_df], ignore_index=True)
+                .drop_duplicates(subset=["url"])
+                .drop_duplicates(subset=["time_published", "title", "source"])
+                .sort_values("time_published")
+                .reset_index(drop=True)
+            )
+        elif not existing_news_df.empty:
+            news_df = existing_news_df
 
     print()
-    print(f"Fetching news sentiment for {args.ticker}...")
-    news_df, chunk_summary_df, daily_limit_hit, daily_limit_message = fetch_news_history(
-        symbol=args.ticker,
-        api_key=api_key,
-        months_back=args.news_months,
-        chunk_days=args.news_chunk_days,
-        limit=args.news_limit,
-        pause_seconds=args.pause_seconds,
-    )
-    print()
-    print(f"Retrieved {len(news_df)} deduplicated news rows.")
+    print(f"Total deduplicated news rows after merge: {len(news_df)}.")
 
-    if daily_limit_hit:
+    if not args.skip_news and daily_limit_hit:
         print("News ingestion stopped early because the free daily request limit was reached.")
         print(daily_limit_message)
 
