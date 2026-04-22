@@ -124,6 +124,93 @@ def strategy_daily_returns(
 
 
 # ---------------------------------------------------------------------------
+# Callable API for external use (e.g. api.py startup)
+# ---------------------------------------------------------------------------
+
+def compute_ticker_metrics(
+    processed_dir: Path = DEFAULT_PROCESSED_DIR,
+    test_frac: float = TEST_FRAC,
+) -> tuple[dict[str, str], dict[str, dict]]:
+    """
+    Train per-ticker models and compute Sharpe, Alpha, Ann.Return.
+
+    Returns:
+        best_model:     ticker -> model name with highest Sharpe
+        historical_perf: ticker -> {"sharpe", "alpha", "ann_ret"}
+    """
+    df = load_all_tickers(processed_dir)
+    df = prepare_features(df)
+    train_df, test_df, _ = time_split(df, test_frac=test_frac)
+
+    test_start = test_df["date"].min()
+    test_end = test_df["date"].max()
+    rf_annual = load_rf_rate(test_start, test_end)
+    rf_daily = (1 + rf_annual) ** (1 / TRADING_DAYS) - 1
+    mkt_daily = load_spy_returns(test_start, test_end)
+
+    ticker_feature_cols = get_feature_cols_single_ticker(df)
+    ticker_results = []
+
+    for ticker in sorted(df["ticker"].unique()):
+        t_train = train_df[train_df["ticker"] == ticker]
+        t_test = test_df[test_df["ticker"] == ticker]
+
+        X_tr = t_train[ticker_feature_cols]
+        y_tr = t_train[TARGET_COL]
+        X_te = t_test[ticker_feature_cols]
+        ticker_mkt = mkt_daily.reindex(t_test["date"].values).dropna()
+
+        for run_name, model, scale in build_models():
+            daily = strategy_daily_returns(
+                X=X_te,
+                y=t_test[TARGET_COL],
+                next_day_returns=t_test["next_day_return"],
+                dates=t_test["date"],
+                tickers=t_test["ticker"],
+                model=model,
+                scale=scale,
+                X_train=X_tr,
+                y_train=y_tr,
+            )
+            strat = daily.set_index("date")["strategy_return"].sort_index()
+            strat, mkt_t = strat.align(ticker_mkt, join="inner")
+
+            ann_ret = annualized_return(strat)
+            sr = sharpe(strat, rf_daily)
+            alp, bet = alpha_beta(strat, mkt_t, rf_daily)
+
+            ticker_results.append({
+                "ticker": ticker,
+                "model": run_name,
+                "ann_ret": ann_ret,
+                "sharpe": sr,
+                "alpha": alp,
+                "beta": bet,
+            })
+
+    results_df = pd.DataFrame(ticker_results)
+    best_rows = (
+        results_df.sort_values("sharpe", ascending=False)
+        .groupby("ticker", sort=False)
+        .first()
+        .reset_index()
+    )
+
+    best_model = {}
+    historical_perf = {}
+    for _, row in best_rows.iterrows():
+        t = row["ticker"]
+        best_model[t] = row["model"]
+        historical_perf[t] = {
+            "sharpe": round(float(row["sharpe"]), 3),
+            "alpha": round(float(row["alpha"]), 4),
+            "ann_ret": round(float(row["ann_ret"]), 4),
+        }
+
+    return best_model, historical_perf
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -210,7 +297,7 @@ def main() -> None:
         X_te = t_test[ticker_feature_cols]
 
         ticker_mkt = mkt_daily.reindex(t_test["date"].values).dropna()
-        bah_ann_t = annualized_return(t_test["next_day_return"])
+        bah_cum_t = float((1 + t_test["next_day_return"]).prod() - 1)
 
         for run_name, model, scale in build_models():
             daily = strategy_daily_returns(
@@ -229,6 +316,7 @@ def main() -> None:
             strat, mkt_t = strat.align(ticker_mkt, join="inner")
 
             ann_ret = annualized_return(strat)
+            strat_cum = float((1 + strat).prod() - 1)
             sr = sharpe(strat, rf_daily)
             alp, bet = alpha_beta(strat, mkt_t, rf_daily)
 
@@ -236,11 +324,12 @@ def main() -> None:
                 "ticker": ticker,
                 "model": run_name,
                 "ann_ret": ann_ret,
+                "strat_cum": strat_cum,
                 "sharpe": sr,
                 "alpha": alp,
                 "beta": bet,
-                "bah_ann": bah_ann_t,
-                "edge": ann_ret - bah_ann_t,
+                "bah_cum": bah_cum_t,
+                "edge": strat_cum - bah_cum_t,
             })
 
     # Keep only the best model per ticker (highest Sharpe)
@@ -253,15 +342,16 @@ def main() -> None:
         .sort_values("ticker")
     )
 
-    print(f"\n{'=' * 76}")
-    print("  BEST MODEL PER TICKER (by Sharpe ratio)")
-    print(f"{'=' * 76}")
-    print(f"  {'Ticker':<6} {'Best Model':<24} {'Ann.Ret':>8} {'Sharpe':>8} {'Alpha':>8} {'Beta':>6} {'vs B&H':>8}")
-    print(f"  {'-'*72}")
+    print(f"\n{'=' * 84}")
+    print("  BEST MODEL PER TICKER (by Sharpe ratio)  |  vs B&H = cumulative return over test period")
+    print(f"{'=' * 84}")
+    print(f"  {'Ticker':<6} {'Best Model':<24} {'Ann.Ret':>8} {'Cum.Ret':>8} {'Sharpe':>8} {'Alpha':>8} {'Beta':>6} {'vs B&H':>8}")
+    print(f"  {'-'*78}")
     for _, row in best_per_ticker.iterrows():
         print(
             f"  {row['ticker']:<6} {row['model']:<24} {row['ann_ret']:>8.2%} "
-            f"{row['sharpe']:>8.3f} {row['alpha']:>8.2%} {row['beta']:>6.3f} {row['edge']:>+8.2%}"
+            f"{row['strat_cum']:>8.2%} {row['sharpe']:>8.3f} {row['alpha']:>8.2%} "
+            f"{row['beta']:>6.3f} {row['edge']:>+8.2%}"
         )
 
 
